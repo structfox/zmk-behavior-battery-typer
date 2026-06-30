@@ -8,7 +8,7 @@
 #include <zmk/battery.h>
 #include <zmk/events/keycode_state_changed.h>
 #include <dt-bindings/zmk/keys.h>
-#if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING)
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) && IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING)
 #include <zmk/split/central.h>
 #endif
 
@@ -16,32 +16,41 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 #if DT_HAS_COMPAT_STATUS_OKAY(DT_DRV_COMPAT)
 
-#define BAT_PRINT_MAX_DIGITS 3
+/*
+ * structfox fork — Charybdis 동글 구조(central=동글, USB라 자기 배터리 무의미)에 맞춤.
+ * 동글 배터리는 건너뛰고, 좌/우 peripheral(0,1)을 라벨 붙여 "L<pct> R<pct>" 로 타이핑한다.
+ * peripheral index ↔ 좌/우 매핑은 BLE 연결/슬롯에 따르므로, 플래시 후 실제 출력이
+ * 좌우 반대면 아래 labels[] 순서만 바꾸면 된다.
+ */
+
+#define BAT_PRINT_MAX_SEQ 16
 
 static const uint32_t digit_keycodes[] = {N0, N1, N2, N3, N4, N5, N6, N7, N8, N9};
 
-static uint8_t bat_print_digits[BAT_PRINT_MAX_DIGITS];
-static uint8_t bat_print_num_digits;
-static uint8_t bat_print_periph_digits[BAT_PRINT_MAX_DIGITS];
-static uint8_t bat_print_periph_num_digits;
+static uint32_t bat_print_seq[BAT_PRINT_MAX_SEQ];
+static uint8_t bat_print_seq_len;
 
-static void pct_to_digits(uint8_t pct, uint8_t *digits, uint8_t *num_digits)
+static void seq_append(uint32_t keycode)
+{
+	if (bat_print_seq_len < BAT_PRINT_MAX_SEQ) {
+		bat_print_seq[bat_print_seq_len++] = keycode;
+	}
+}
+
+static void seq_append_pct(uint8_t pct)
 {
 	if (pct > 100) {
 		pct = 100;
 	}
 	if (pct >= 100) {
-		digits[0] = 1;
-		digits[1] = 0;
-		digits[2] = 0;
-		*num_digits = 3;
+		seq_append(N1);
+		seq_append(N0);
+		seq_append(N0);
 	} else if (pct >= 10) {
-		digits[0] = (uint8_t)(pct / 10);
-		digits[1] = (uint8_t)(pct % 10);
-		*num_digits = 2;
+		seq_append(digit_keycodes[pct / 10]);
+		seq_append(digit_keycodes[pct % 10]);
 	} else {
-		digits[0] = pct;
-		*num_digits = 1;
+		seq_append(digit_keycodes[pct]);
 	}
 }
 
@@ -49,39 +58,13 @@ static void bat_print_work_handler(struct k_work *work)
 {
 	int64_t ts;
 
-	for (uint8_t i = 0; i < bat_print_num_digits; i++) {
-		uint8_t d = bat_print_digits[i];
-		if (d > 9) {
-			continue;
-		}
+	for (uint8_t i = 0; i < bat_print_seq_len; i++) {
 		ts = k_uptime_get();
-		raise_zmk_keycode_state_changed_from_encoded(digit_keycodes[d], true, ts);
+		raise_zmk_keycode_state_changed_from_encoded(bat_print_seq[i], true, ts);
 		k_msleep(20);
 		ts = k_uptime_get();
-		raise_zmk_keycode_state_changed_from_encoded(digit_keycodes[d], false, ts);
+		raise_zmk_keycode_state_changed_from_encoded(bat_print_seq[i], false, ts);
 		k_msleep(10);
-	}
-
-	if (bat_print_periph_num_digits > 0) {
-		ts = k_uptime_get();
-		raise_zmk_keycode_state_changed_from_encoded(SPC, true, ts);
-		k_msleep(20);
-		ts = k_uptime_get();
-		raise_zmk_keycode_state_changed_from_encoded(SPC, false, ts);
-		k_msleep(10);
-
-		for (uint8_t i = 0; i < bat_print_periph_num_digits; i++) {
-			uint8_t d = bat_print_periph_digits[i];
-			if (d > 9) {
-				continue;
-			}
-			ts = k_uptime_get();
-			raise_zmk_keycode_state_changed_from_encoded(digit_keycodes[d], true, ts);
-			k_msleep(20);
-			ts = k_uptime_get();
-			raise_zmk_keycode_state_changed_from_encoded(digit_keycodes[d], false, ts);
-			k_msleep(10);
-		}
 	}
 }
 
@@ -90,16 +73,25 @@ K_WORK_DEFINE(bat_print_work, bat_print_work_handler);
 static int on_bat_print_binding_pressed(struct zmk_behavior_binding *binding,
 					struct zmk_behavior_binding_event event)
 {
-	uint8_t pct = zmk_battery_state_of_charge();
+	bat_print_seq_len = 0;
 
-	pct_to_digits(pct, bat_print_digits, &bat_print_num_digits);
-
-	bat_print_periph_num_digits = 0;
-#if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING)
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) && IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING)
+	/* 동글(central) 자체 배터리는 USB라 무의미 → 스킵하고 좌/우 peripheral 만 출력. */
+	static const uint32_t labels[] = {LS(L), LS(R)};
 	uint8_t periph_pct;
-	if (zmk_split_central_get_peripheral_battery_level(0, &periph_pct) == 0) {
-		pct_to_digits(periph_pct, bat_print_periph_digits, &bat_print_periph_num_digits);
+
+	for (uint8_t i = 0; i < CONFIG_ZMK_SPLIT_BLE_CENTRAL_PERIPHERALS && i < 2; i++) {
+		if (zmk_split_central_get_peripheral_battery_level(i, &periph_pct) == 0) {
+			if (bat_print_seq_len > 0) {
+				seq_append(SPACE);
+			}
+			seq_append(labels[i]);
+			seq_append_pct(periph_pct);
+		}
 	}
+#else
+	/* split 미사용/central 아님: 로컬 배터리만 숫자로 */
+	seq_append_pct(zmk_battery_state_of_charge());
 #endif
 
 	k_work_submit(&bat_print_work);

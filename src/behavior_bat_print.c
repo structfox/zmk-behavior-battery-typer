@@ -18,9 +18,10 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 /*
  * structfox fork — Charybdis 동글 구조(central=동글, USB라 자기 배터리 무의미)에 맞춤.
- * 동글 배터리는 건너뛰고, 좌/우 peripheral(0,1)을 라벨 붙여 "L<pct> R<pct>" 로 타이핑한다.
- * peripheral index ↔ 좌/우 매핑은 BLE 연결/슬롯에 따르므로, 플래시 후 실제 출력이
- * 좌우 반대면 아래 labels[] 순서만 바꾸면 된다.
+ * 동글 배터리는 건너뛰고, 좌/우 peripheral 을 라벨 붙여 "L<pct> R<pct>" 로 타이핑한다.
+ * peripheral slot 은 동글이 처음 페어링한 순서로 정해져 settings 에 저장된다.
+ * 이 키보드는 slot 0 = 오른쪽, slot 1 = 왼쪽으로 저장돼 있어서 slots[] 로 좌/우를 맞춘다.
+ * 동글 settings 를 지우고 다시 페어링해 좌우가 반대로 나오면 slots[] 순서를 바꾼다.
  */
 
 #define BAT_PRINT_MAX_SEQ 16
@@ -77,11 +78,13 @@ static int on_bat_print_binding_pressed(struct zmk_behavior_binding *binding,
 
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) && IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING)
 	/* 동글(central) 자체 배터리는 USB라 무의미 → 스킵하고 좌/우 peripheral 만 출력. */
+	/* labels[i] 는 slots[i] 의 배터리에 붙는다. 범위 밖 slot 은 getter 가 -EINVAL 로 거른다. */
+	static const uint8_t slots[] = {1, 0};
 	static const uint32_t labels[] = {LS(L), LS(R)};
 	uint8_t periph_pct;
 
-	for (uint8_t i = 0; i < CONFIG_ZMK_SPLIT_BLE_CENTRAL_PERIPHERALS && i < 2; i++) {
-		if (zmk_split_central_get_peripheral_battery_level(i, &periph_pct) == 0) {
+	for (uint8_t i = 0; i < ARRAY_SIZE(slots); i++) {
+		if (zmk_split_central_get_peripheral_battery_level(slots[i], &periph_pct) == 0) {
 			if (bat_print_seq_len > 0) {
 				seq_append(SPACE);
 			}
